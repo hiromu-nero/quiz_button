@@ -1,0 +1,139 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <iostream>
+
+// ★環境に合わせてポート名を変更してください
+const char* PORT_NAME_1 = "/dev/ttyUSB0"; // USBポート0
+const char* PORT_NAME_2 = "/dev/ttyUSB1"; // USBポート1
+
+int setup_serial(const char* portname) {
+    int fd = open(portname, O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (fd < 0) {
+        perror(portname);
+        return -1;
+    }
+
+    struct termios tty;
+    if (tcgetattr(fd, &tty) != 0) {
+        perror("tcgetattr");
+        return -1;
+    }
+
+    cfsetospeed(&tty, B9600);
+    cfsetispeed(&tty, B9600);
+    
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+
+    tty.c_lflag &= ~ICANON;
+    tty.c_lflag &= ~ECHO; 
+    tty.c_lflag &= ~ECHOE; 
+    tty.c_lflag &= ~ISIG;
+
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    
+    tcsetattr(fd, TCSANOW, &tty);
+    return fd;
+}
+
+void send_reset(int fd1, int fd2, char signal) {
+    write(fd1, &signal, 1);
+    write(fd2, &signal, 1);
+}
+
+int main() {
+    int fd1 = setup_serial(PORT_NAME_1);
+    int fd2 = setup_serial(PORT_NAME_2);
+
+    if (fd1 < 0 || fd2 < 0) {
+        printf("Error: シリアルポートを開けませんでした。\n");
+        return 1;
+    }
+
+    printf("--- 早押しクイズ判定システム ---\n");
+    printf("待機中... (ボタン入力待ち)\n");
+
+    char buf[1];
+    int winner = 0;
+
+    // --- メインループ ---
+    while (1) {
+        // ==========================================
+        // 1. 待機モード
+        // ==========================================
+        winner = 0;
+        
+        while (winner == 0) {
+            if (read(fd1, buf, 1) > 0) {
+                winner = 1;
+            }
+            else if (read(fd2, buf, 1) > 0) {
+                winner = 2;
+            }
+            usleep(1000); 
+        }
+
+        // ==========================================
+        // 2. 判定モード
+        // ==========================================
+        
+        if (winner == 1) {
+            printf("\n>> [判定] 回答者 1 (ポート0) がボタンを押しました！\n");
+        } else {
+            printf("\n>> [判定] 回答者 2 (ポート1) がボタンを押しました！\n");
+        }
+        
+        // --- 判定入力 ---
+        printf("判定を入力してください (t:正解 / f:誤答): ");
+        
+        char judge = 0;
+        bool valid_input = false;
+
+        // キーボード入力待ちの間、ボタンが押されてもバッファに溜まる
+        while (!valid_input) {
+            std::cin >> judge; 
+
+            if (judge == 't') {
+                printf("==> 「正解」です！\n\n");
+                send_reset(fd1, fd2, 't');
+                valid_input = true;
+            } 
+            else if (judge == 'f') {
+                printf("==> 「誤答」です。\n\n");
+                send_reset(fd1, fd2, 'f');
+                valid_input = true;
+            }
+        }
+        
+        // ==========================================
+        // ★重要: バッファクリア処理
+        // ==========================================
+        // 判定中（キーボード入力待ち中）に押されたボタン入力が
+        // OSのバッファに残っているため、次のループに行く前に全て消去します。
+        
+        // 方法1: システムコールでフラッシュ (受信バッファをクリア)
+        tcflush(fd1, TCIFLUSH);
+        tcflush(fd2, TCIFLUSH);
+
+        // 方法2: 念のため読み捨てループ (一部のドライバでtcflushが効かない場合の保険)
+        char dummy;
+        while(read(fd1, &dummy, 1) > 0);
+        while(read(fd2, &dummy, 1) > 0);
+
+        // 少し待機してから再開（リセット信号がマイコンに届いて処理される時間を稼ぐ）
+        usleep(100000); // 0.1秒待機
+
+        printf("----------------------------------\n");
+        printf("待機中... (次の問題へ)\n");
+    }
+
+    close(fd1);
+    close(fd2);
+    return 0;
+}
